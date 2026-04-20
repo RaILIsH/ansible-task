@@ -15,7 +15,7 @@
 
 - name: Install PostgreSQL {{ pg_exact_version }}
   ansible.builtin.dnf:
-    name: "postgresql-server-13.23-1.el9"
+    name: "postgresql13-server-13.23"
     state: present
   tags: [postgresql, install]
 
