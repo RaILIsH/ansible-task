@@ -1,0 +1,58 @@
+---
+- name: Install PostgreSQL official repository
+  ansible.builtin.dnf:
+    name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-{{ ansible_distribution_major_version | default('8') }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+    state: present
+    disable_gpg_check: true
+  tags: [postgresql, install]
+
+- name: Disable built-in postgresql module
+  ansible.builtin.command: dnf -q module disable postgresql -y
+  register: pg_module
+  changed_when: "'Disabling modules' in pg_module.stdout"
+  failed_when: false
+  tags: [postgresql, install]
+
+- name: Install PostgreSQL {{ pg_exact_version }}
+  ansible.builtin.dnf:
+    name: "postgresql-server-13.23-1.el9"
+    state: present
+  tags: [postgresql, install]
+
+- name: Check if PostgreSQL is initialized
+  ansible.builtin.stat:
+    path: /var/lib/pgsql/{{ pg_version }}/data/PG_VERSION
+  register: pg_data
+  tags: [postgresql, config]
+
+- name: Initialize PostgreSQL database
+  ansible.builtin.command: /usr/pgsql-{{ pg_version }}/bin/postgresql-{{ pg_version }}-setup initdb
+  when: not pg_data.stat.exists and not ansible_check_mode # Условие для check_mode и защиты от двойной инициализации
+  tags: [postgresql, config]
+
+- name: Create PG data directory for check_mode compatibility
+  ansible.builtin.file:
+    path: /var/lib/pgsql/{{ pg_version }}/data
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+  when: ansible_check_mode
+  tags: [postgresql, config]
+
+- name: Configure pg_hba.conf (ACL host 127.0.0.1/32 md5)
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: /var/lib/pgsql/{{ pg_version }}/data/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: "0600"
+  notify: Restart postgresql
+  tags: [postgresql, config]
+
+- name: Ensure PostgreSQL is enabled and started
+  ansible.builtin.service:
+    name: "postgresql-{{ pg_version }}"
+    state: started
+    enabled: true
+  tags: [postgresql, service]

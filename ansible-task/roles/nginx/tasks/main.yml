@@ -1,0 +1,38 @@
+---
+- name: Install EPEL repository
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install Nginx package
+  ansible.builtin.dnf:
+    name: nginx
+    state: present
+    update_cache: true
+    disable_gpg_check: true 
+  register: nginx_install_result
+
+- name: Ensure /etc/nginx exists before copying config
+  ansible.builtin.file:
+    path: /etc/nginx
+    state: directory
+    mode: '0755'
+
+- name: Deploy nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart nginx
+  tags: [nginx, config]
+
+- name: Deploy index.html with server info
+  ansible.builtin.template:
+    src: index.html.j2
+    dest: /usr/share/nginx/html/index.html
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [nginx, config, html]

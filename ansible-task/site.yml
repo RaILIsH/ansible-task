@@ -1,0 +1,33 @@
+---
+- name: Setup NTP Server
+  hosts: ntp
+  roles:
+    - chrony
+
+- name: Setup APP Server
+  hosts: app
+  roles:
+    - nginx
+
+- name: Setup DB Server
+  hosts: db
+  roles:
+    - postgresql
+
+- name: Post-deployment summary
+  hosts: app
+  tasks:
+    - name: Get Nginx version
+      ansible.builtin.command: nginx -v
+      register: nginx_ver
+      changed_when: false
+      check_mode: false
+      ignore_errors: true
+
+    - name: Display Nginx version and log paths
+      ansible.builtin.debug:
+        msg:
+          - "Nginx Version: {{ nginx_ver.stderr | default('Nginx is not installed') }}"
+          - "Access Log path: {{ nginx_access_log }}"
+          - "Error Log path: {{ nginx_error_log }}"
+      tags: [always]

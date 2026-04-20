@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ansible Nginx App</title>
+</head>
+<body>
+    <h1>Application Server is Running</h1>
+    <hr>
+    <footer>
+        <p>Hostname: {{ ansible_hostname }}</p>
+        <p>IP Address: {{ ansible_default_ipv4.address | default('IP not found') }}</p>
+    </footer>
+</body>
+</html>
