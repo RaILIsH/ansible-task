@@ -1,0 +1,232 @@
+# Пайплайн контроля UEFI-драйвера NTFS (uefi-driver + libntfs-3g).
+# YAML только выбирает стадию и зовёт ci/*.sh. Нет скрипта — в out/ пишется
+# NOT_IMPLEMENTED, и это не считается выполненным исследованием.
+#
+# Объект анализа — SCAN_DIRS, не весь репозиторий: ntfsprogs, libfuse-lite,
+# m4 и .vs в поверхность атаки не входят.
+# Контролируемая сборка — EDK2: build -p uefi-driver.dsc.
+# Субмодуль gnu-efi — запасной путь Visual Studio, этот пайплайн его не собирает.
+# Native-сборка — autotools libntfs-3g для ASan и фаззинга парсера.
+# Это не ELF-копия .efi и не замена прогона в QEMU/OVMF.
+
+stages:
+  - prepare   # ПОД: что анализируем и чем
+  - build     # ПОД.2: воспроизводимая сборка и её отчёт
+  - kao       # КАО.1 по составу, КАО.2 на стенде
+  - sast      # САО
+  - dast      # ДАО.1 и ДАО.2
+  - expert    # заготовка под ЭКО, не сама экспертиза
+  - report    # сводка для протокола
+
+variables:
+  SCAN_DIRS: "uefi-driver libntfs-3g include"
+  EDK2_DSC: "uefi-driver.dsc"
+  RUN_BUILD:
+    value: "0"
+    options: ["0", "1"]
+    description: "EDK2 uefi-driver.dsc и native libntfs-3g"
+  RUN_SBOM_EDK2:
+    value: "0"
+    options: ["0", "1"]
+    description: "SBOM из Build Report, сверенный с libntfs-3g"
+  RUN_VULN:
+    value: "0"
+    options: ["0", "1"]
+    description: "CVE/БДУ только по составу драйвера"
+  RUN_SVACE:
+    value: "0"
+    options: ["0", "1"]
+    description: "Svace по uefi-driver и libntfs-3g"
+  RUN_UNIT_NATIVE:
+    value: "0"
+    options: ["0", "1"]
+    description: "Тесты парсера libntfs-3g"
+  RUN_FUZZ_NATIVE:
+    value: "0"
+    options: ["0", "1"]
+    description: "Фаззинг парсера NTFS (ELF)"
+  RUN_QEMU:
+    value: "0"
+    options: ["0", "1"]
+    description: "QEMU/OVMF: чтение, битый том, повторы"
+
+default:
+  image: python:3.12-slim
+  interruptible: true
+  artifacts:
+    when: always
+    paths: [out/]
+    expire_in: 30 days
+
+tools:
+  stage: prepare
+  script:
+    - mkdir -p out/prepare
+    - |
+      {
+        echo "commit=$CI_COMMIT_SHA"
+        echo "ref=$CI_COMMIT_REF_NAME"
+        echo "pipeline=$CI_PIPELINE_ID"
+        echo "project=$CI_PROJECT_PATH"
+        echo "scan_dirs=$SCAN_DIRS"
+        echo "dsc=$EDK2_DSC"
+        git submodule status --recursive || true
+      } > out/prepare/tools.txt
+
+source_map:
+  stage: prepare
+  script:
+    - mkdir -p out/prepare
+    - |
+      find $SCAN_DIRS -type f \
+        \( -name "*.c" -o -name "*.h" -o -name "*.inf" -o -name "*.dsc" \) \
+        | sort > out/prepare/sources.txt
+    - wc -l out/prepare/sources.txt
+
+doxygen:
+  stage: prepare
+  script:
+    - apt-get update -qq && apt-get install -y -qq doxygen graphviz >/dev/null
+    - mkdir -p out/docs
+    - doxygen -g Doxyfile.ci
+    - sed -i 's@^OUTPUT_DIRECTORY .*@OUTPUT_DIRECTORY = out/docs@' Doxyfile.ci
+    - sed -i 's@^RECURSIVE .*@RECURSIVE = YES@' Doxyfile.ci
+    - sed -i "s@^INPUT .*@INPUT = $SCAN_DIRS@" Doxyfile.ci
+    - doxygen Doxyfile.ci > out/docs/doxygen.log 2>&1 || true
+
+build_uefi:
+  stage: build
+  rules: [{if: '$RUN_BUILD == "1"'}]
+  script:
+    - mkdir -p out/build/uefi
+    - |
+      if [ -x ci/build-uefi.sh ]; then
+        ci/build-uefi.sh out/build/uefi
+        test -s out/build/uefi/edk2-build-report.txt
+        test -s out/build/uefi/driver.sha256
+      else
+        echo "NOT_IMPLEMENTED: ci/build-uefi.sh" | tee out/build/uefi/status.txt
+      fi
+
+build_native:
+  stage: build
+  rules: [{if: '$RUN_BUILD == "1"'}]
+  script:
+    - mkdir -p out/build/native
+    - |
+      if [ -x ci/build-native.sh ]; then
+        ci/build-native.sh out/build/native
+      else
+        echo "NOT_IMPLEMENTED: ci/build-native.sh (autotools libntfs-3g, не ELF-копия .efi)" | tee out/build/native/status.txt
+      fi
+
+kao1:
+  stage: kao
+  script:
+    - mkdir -p out/kao1
+    - |
+      grep -RInE "TODO|FIXME|HACK|XXX" --include="*.c" --include="*.h" \
+        $SCAN_DIRS > out/kao1/comments.txt || true
+    - |
+      {
+        echo "Объект: uefi-driver + libntfs-3g. ntfsprogs и libfuse-lite в поверхность не входят."
+        echo "Сборка протокола: EDK2 -p uefi-driver.dsc. Субмодуль gnu-efi — альтернативная сборка VS, не результат этого job."
+        echo "NOT_APPLICABLE: контейнеры, веб, SUID, сканеры сети — сетевых интерфейсов у драйвера нет."
+        echo "Запись тома в драйвере есть; негативные проверки сначала на пути чтения."
+      } > out/kao1/scope.txt
+
+sbom_edk2:
+  stage: kao
+  rules: [{if: '$RUN_BUILD == "1" && $RUN_SBOM_EDK2 == "1"'}]
+  script:
+    - mkdir -p out/kao1/sbom
+    - |
+      if [ -x ci/sbom-edk2.sh ] && [ -s out/build/uefi/edk2-build-report.txt ]; then
+        ci/sbom-edk2.sh out/build/uefi/edk2-build-report.txt out/kao1/sbom
+      else
+        echo "NOT_IMPLEMENTED: SBOM" | tee out/kao1/sbom/status.txt
+      fi
+
+vuln_scan:
+  stage: kao
+  rules: [{if: '$RUN_VULN == "1"'}]
+  script:
+    - mkdir -p out/kao1
+    - |
+      if [ -x ci/vuln-scan.sh ]; then ci/vuln-scan.sh out/kao1
+      else echo "NOT_IMPLEMENTED: ci/vuln-scan.sh" | tee out/kao1/vuln-status.txt
+      fi
+
+kao2_uefi:
+  stage: kao
+  tags: [uefi-qemu-shell]
+  resource_group: uefi-lab
+  rules: [{if: '$RUN_QEMU == "1"'}]
+  script:
+    - mkdir -p out/kao2
+    - |
+      if [ -x ci/kao2-uefi.sh ]; then ci/kao2-uefi.sh out/kao2
+      else echo "NOT_IMPLEMENTED: ci/kao2-uefi.sh" | tee out/kao2/status.txt
+      fi
+
+svace:
+  stage: sast
+  rules: [{if: '$RUN_SVACE == "1"'}]
+  script:
+    - mkdir -p out/sast
+    - |
+      if [ -x ci/run-svace.sh ]; then ci/run-svace.sh out/sast
+      else echo "NOT_IMPLEMENTED: ci/run-svace.sh" | tee out/sast/status.txt
+      fi
+
+unit_native:
+  stage: dast
+  rules: [{if: '$RUN_UNIT_NATIVE == "1"'}]
+  script:
+    - mkdir -p out/dast/unit-native
+    - |
+      if [ -x ci/unit-native.sh ]; then ci/unit-native.sh out/dast/unit-native
+      else echo "NOT_IMPLEMENTED: ci/unit-native.sh" | tee out/dast/unit-native/status.txt
+      fi
+
+unit_uefi:
+  stage: dast
+  tags: [uefi-qemu-shell]
+  resource_group: uefi-lab
+  rules: [{if: '$RUN_QEMU == "1"'}]
+  script:
+    - mkdir -p out/dast/unit-uefi
+    - |
+      if [ -x ci/unit-uefi.sh ]; then ci/unit-uefi.sh out/dast/unit-uefi
+      else echo "NOT_IMPLEMENTED: ci/unit-uefi.sh" | tee out/dast/unit-uefi/status.txt
+      fi
+
+fuzz_native:
+  stage: dast
+  rules: [{if: '$RUN_FUZZ_NATIVE == "1"'}]
+  script:
+    - mkdir -p out/dast/fuzz-native
+    - |
+      if [ -x ci/fuzz-native.sh ]; then ci/fuzz-native.sh out/dast/fuzz-native
+      else echo "NOT_IMPLEMENTED: ci/fuzz-native.sh" | tee out/dast/fuzz-native/status.txt
+      fi
+
+fuzz_uefi_stub:
+  stage: dast
+  script:
+    - mkdir -p out/dast/fuzz-uefi
+    - echo "NOT_IMPLEMENTED: UEFI fuzzing/coverage" > out/dast/fuzz-uefi/status.txt
+
+expert_preparation:
+  stage: expert
+  script:
+    - mkdir -p out/expert
+    - echo "ЭКО вручную. Участки: разбор NTFS в libntfs-3g и вызовы из uefi-driver. Этот job экспертизу не выполняет." > out/expert/review.txt
+
+report:
+  stage: report
+  script:
+    - mkdir -p out/report
+    - find out -type f | sort > out/report/artifact-list.txt
+    - find out -type f ! -path "out/report/*" -exec sha256sum {} \; > out/report/sha256.txt
+    - printf '{"commit":"%s","ref":"%s","pipeline":"%s","dsc":"%s"}\n' "$CI_COMMIT_SHA" "$CI_COMMIT_REF_NAME" "$CI_PIPELINE_ID" "$EDK2_DSC" > out/report/manifest.json
